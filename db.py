@@ -59,16 +59,11 @@ class Database:
 
     def add_rss_item(self, source: str, id: str, title: str, summary: str, links: List[str]):
         c = self.conn.cursor()
-        c.execute("SELECT * FROM processed_rss WHERE source=? AND id=?", (source, id))
-        processed = c.fetchone()
-        if processed is not None:
-            c.execute("""
-                INSERT OR IGNORE INTO rss_to_process (source, id, title, summary, links)
-                VALUES (?, ?, ?, ?, ?)""",
-                (source, id, title, summary, orjson.dumps(links))
-            )
-        else:
-            print(f"Skipped {source} {id}")
+        c.execute("""
+            INSERT OR IGNORE INTO rss_to_process (source, id, title, summary, links)
+            VALUES (?, ?, ?, ?, ?)""",
+            (source, id, title, summary, orjson.dumps(links))
+        )
         self.conn.commit()
         
     def get_processable_rss(self):
