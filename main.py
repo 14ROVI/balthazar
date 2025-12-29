@@ -81,12 +81,12 @@ def process_posts(queue: SimpleQueue):
     
 
 def main():
-    # t_fetch = threading.Thread(target=fetcher_loop, name="Fetcher", daemon=True)
-    # t_process = threading.Thread(target=processor_loop, name="Processor", daemon=True)
+    t_fetch = threading.Thread(target=fetcher_loop, name="Fetcher", daemon=True)
+    t_process = threading.Thread(target=processor_loop, name="Processor", daemon=True)
     t_alert = threading.Thread(target=alerter_loop, name="Alerter", daemon=True)
 
-    # t_fetch.start()
-    # t_process.start()
+    t_fetch.start()
+    t_process.start()
     t_alert.start()
     
     fetch_and_process_posts()
