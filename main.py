@@ -3,8 +3,13 @@ from rss import RssFetcher
 from trance import AntiBot
 from alert import AlertSender
 from ai_engine import GeminiAnalyst
+from mastodon_listener import MastodonClient
+from bluesky import BlueskyClient
+from post_processor import PostProcessor
 from process_rss import RssProcessor
 
+from queue import SimpleQueue
+from typing import Tuple
 import threading
 import time
 import sys
@@ -51,15 +56,40 @@ def alerter_loop():
             print(f"❌ [Alerter Error]: {e}")
         
         time.sleep(ALERT_INTERVAL)
+        
+def fetch_and_process_posts():
+    queue = SimpleQueue()
+    
+    mastodon_client = MastodonClient(queue)
+    bluesky_client = BlueskyClient(queue)
+    
+    t_mastodon_listen = threading.Thread(target=mastodon_client.listen, name="Mastodon Firehose", daemon=True)
+    t_bluesky_listen = threading.Thread(target=bluesky_client.listen, name="BlueSky Firehose", daemon=True)
+    t_process_queue = threading.Thread(target=process_posts, name="Mastodon Firehose", args=[queue], daemon=True)
+    
+    t_mastodon_listen.start()
+    t_bluesky_listen.start()
+    t_process_queue.start()
+    
+def process_posts(queue: SimpleQueue):
+    database = Database()
+    analyst = GeminiAnalyst()
+    processor = PostProcessor(database, analyst, queue)
+    
+    processor.process_queue()
+    
+    
 
 def main():
-    t_fetch = threading.Thread(target=fetcher_loop, name="Fetcher", daemon=True)
-    t_process = threading.Thread(target=processor_loop, name="Processor", daemon=True)
+    # t_fetch = threading.Thread(target=fetcher_loop, name="Fetcher", daemon=True)
+    # t_process = threading.Thread(target=processor_loop, name="Processor", daemon=True)
     t_alert = threading.Thread(target=alerter_loop, name="Alerter", daemon=True)
 
-    t_fetch.start()
-    t_process.start()
+    # t_fetch.start()
+    # t_process.start()
     t_alert.start()
+    
+    fetch_and_process_posts()
 
     try:
         while True:
