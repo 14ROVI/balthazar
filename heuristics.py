@@ -15,6 +15,9 @@ IGNORE_DOMAINS = {
     "amzn.to",
     "amazon.com",
     "amazon.co.uk",
+    "rss-parrot.net",
+    "newsbeep.com",
+    "newsbeep.org",
 }
 
 SHORTLIST_ACCOUNTS = {
@@ -31,11 +34,14 @@ SHORTLIST_ACCOUNTS = {
     
     # Mastodon
     # @mastodon.social users have no @mastodon.social in tag as we are on their fedi
-    "EUVD_Bot"
+    "EUVD_Bot",
 }
 
 IGNORE_ACCOUNTS = {
+    # BlueSky
     "did:plc:2kzaomqz4kto7ii5sry7sgfs",
+    # Mastodon
+    "newsbeep@newsbeep.org",
 }
 
 KEYWORDS = {
@@ -109,6 +115,8 @@ def should_process_post(post: Post) -> bool:
         return False
     
     for domain in IGNORE_DOMAINS:
+        if domain in post.url:
+            return False
         for link in post.links:
             if domain in link:
                 return False
