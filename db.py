@@ -1,12 +1,29 @@
 from enum import Enum
+from domain.rss_item import RssItem
+from domain.intelligence import Intelligence
 from typing import List
 import orjson
 import sqlite3
+import time
 from env import DB_NAME
+from dataclasses import dataclass
 
-class Status(Enum):
-    UNPROCESSED = 0
-    PROCESSED = 1
+
+@dataclass
+class RssRow:
+    source: str
+    id: str
+    added: int
+
+@dataclass
+class EventRow:
+    id: int
+    summary: str
+    signal: int
+    alerted: bool
+    sources: List[str]
+    added: int
+    last_updated: int
 
 
 class Database:
@@ -15,97 +32,127 @@ class Database:
         self.conn.row_factory = sqlite3.Row
         
         c = self.conn.cursor()
-        c.execute(f"""
-            CREATE TABLE IF NOT EXISTS rss_to_process (
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS rss (
                 source TEXT,
                 id TEXT,
-                title TEXT,
-                summary TEXT,
-                links TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                added DATETIME DEFAULT (unixepoch()),
                 PRIMARY KEY (source, id)
-            )
+            );
         """)
         
-        c.execute(f"""
-            CREATE TABLE IF NOT EXISTS processed_rss (
-                source TEXT,
-                id TEXT,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (source, id)
-            )
-        """)
-        
-        c.execute(f"""
-            CREATE TABLE IF NOT EXISTS external_pages_to_process (
-                url TEXT PRIMARY KEY,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        c.execute(f"""
-            CREATE TABLE IF NOT EXISTS intelligence (
-                id TEXT PRIMARY KEY,
-                url TEXT,
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS events (
+                id INTEGER PRIMARY KEY,
                 summary TEXT,
                 signal INTEGER,
-                financial INTEGER,
-                alertable INTEGER,
-                alerted INTEGER,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                alerted INTEGER DEFAULT FALSE,
+                sources TEXT,
+                added INTEGER DEFAULT (unixepoch()),
+                last_updated DATETIME DEFAULT (unixepoch())
             )
         """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_alert ON events (signal, alerted)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_last_updated ON events (last_updated)")
+
         self.conn.commit()
 
-    def add_rss_item(self, source: str, id: str, title: str, summary: str, links: List[str]):
+
+    ## RSS ITEMS
+
+    def add_rss_item(self, source: str, id: str):
         c = self.conn.cursor()
         c.execute("""
-            INSERT OR IGNORE INTO rss_to_process (source, id, title, summary, links)
-            VALUES (?, ?, ?, ?, ?)""",
-            (source, id, title, summary, orjson.dumps(links))
-        )
-        self.conn.commit()
-        
-    def get_processable_rss(self):
-        c = self.conn.cursor()
-        c.execute("SELECT source, id, title, summary, links FROM rss_to_process WHERE (source, id) NOT IN (SELECT source, id FROM processed_rss)")
-        data = c.fetchall()
-        self.conn.commit()
-        
-        return data
-
-    def set_rss_processed(self, source: str, id: str):
-        c = self.conn.cursor()
-        c.execute(
-            "INSERT OR IGNORE INTO processed_rss (source, id) VALUES (?, ?)",
+            INSERT OR IGNORE INTO rss (source, id)
+            VALUES (?, ?)""",
             (source, id)
         )
         self.conn.commit()
         
-        
-    def save_intelligence(self, id: str, url: str, summary: str, signal: int, financial: bool, alertable: bool, alerted: bool):
-        c = self.conn.cursor()
-        c.execute("""
-            INSERT OR IGNORE INTO intelligence (id, url, summary, signal, financial, alertable, alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (id, url, summary, signal, financial, alertable, alerted)
-            )
-        self.conn.commit()
-        
-
-    def get_alertable_intelligence(self):
-        c = self.conn.cursor()
-        c.execute("SELECT id, url, summary, signal FROM intelligence WHERE alertable = TRUE AND alerted = FALSE")
-        data = c.fetchall()
-        self.conn.commit()
-        
-        return data
-
-    def set_intelligence_alerted(self, id: str):
+    def has_rss_item(self, source: str, id: str) -> bool:
         c = self.conn.cursor()
         c.execute(
-            "UPDATE intelligence SET alerted = TRUE WHERE id = ?",
-            (id, )
+            "SELECT source, id FROM rss_items WHERE source = ? AND id = ?",
+            (source, id)
+        )
+        return c.fetchone() is not None
+
+    
+    ## EVENTS
+        
+    def add_event(self, summary: str, signal: int, sources: List[str]):
+        c = self.conn.cursor()
+        c.execute(
+            "INSERT INTO events (summary, signal, sources) VALUES (?, ?, ?)",
+            (summary, signal, orjson.dumps(sources))
         )
         self.conn.commit()
         
+    def update_event_summary(self, id: int, summary: str):
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE events SET summary = ? WHERE id = ?",
+            (summary, id)
+        )
+        self.conn.commit()
+        
+    def add_event_sources(self, id: int, sources: List[str]):
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT sources FROM events WHERE id = ?",
+            (id, )
+        )
+        data = c.fetchone()
+        if data is None: return
+        
+        new_sources = orjson.loads(data["sources"]) + sources
+        
+        c.execute(
+            "UPDATE events SET sources = ?, last_updated = ? WHERE id = ?",
+            (orjson.dumps(new_sources), int(time.time()), id)
+        )
+        
+        self.conn.commit()
+        
+    def get_alertable_events(self, min_signal: int) -> List[EventRow]:
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT *
+            FROM events
+            WHERE signal > ? AND alerted = FALSE""",
+            (min_signal, )
+        )
+        
+        return [_to_event_row(row) for row in c.fetchall()]
+        
+    def set_event_alerted(self, id: int, alerted: bool = True):
+        c = self.conn.cursor()
+        c.execute(
+            "UPDATE events SET alerted = ? WHERE id = ?",
+            (alerted, id)
+        )
+        self.conn.commit()
+
+    def get_recent_events(self, min_timestamp: int) -> List[EventRow]:
+        c = self.conn.cursor()
+        c.execute("""
+            SELECT *
+            FROM events
+            WHERE last_updated > ?
+            ORDER BY last_updated DESC""",
+            (min_timestamp, )
+        )
+        
+        return [_to_event_row(row) for row in c.fetchall()]
+
+    
+def _to_event_row(row: sqlite3.Row) -> EventRow:
+    return EventRow(
+        row["id"],
+        row["summary"],
+        row["signal"],
+        row["alerted"],
+        orjson.loads(row["sources"]),
+        row["added"],
+        row["last_updated"],
+    )

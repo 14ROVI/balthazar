@@ -1,6 +1,6 @@
 from domain.post import Post
 from typing import List
-from queue import SimpleQueue
+
 import asyncio
 import orjson
 import websockets
@@ -23,13 +23,10 @@ def extract_links(data) -> List[str]:
     return links
 
 class BlueskyClient:
-    def __init__(self, queue: SimpleQueue[Post]) -> None:
+    def __init__(self, queue: asyncio.Queue[Post]) -> None:
         self.queue = queue
         
-    def listen(self):
-        asyncio.run(self._async_listen())
-        
-    async def _async_listen(self):
+    async def listen(self):
         async with websockets.connect(BLUESKY_WEBSOCKET) as websocket:
             async for message in websocket:
                 message = await websocket.recv()
@@ -54,6 +51,6 @@ class BlueskyClient:
                         links
                     )
                     
-                    self.queue.put(post)
+                    await self.queue.put(post)
                 except:
                     continue

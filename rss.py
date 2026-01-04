@@ -1,6 +1,14 @@
-import feedparser
 from db import Database
 from trance import AntiBot
+from ai_engine import GeminiAnalyst
+from domain.post import Post
+
+import asyncio
+from asyncio import Queue
+from html_to_markdown import convert
+import feedparser
+from feedparser import FeedParserDict
+
 
 RSS_FEEDS = [
     # congress.gov
@@ -30,7 +38,7 @@ RSS_FEEDS = [
     "https://www.cisa.gov/news.xml",
     
     # arxiv
-    "http://export.arxiv.org/rss/cs.AI",
+    # "http://export.arxiv.org/rss/cs.AI",
     
     # department of justice
     "https://www.justice.gov/news/rss",
@@ -64,36 +72,75 @@ RSS_FEEDS = [
 ]
 
 class RssFetcher:
-    def __init__(self, db: Database, antibot: AntiBot) -> None:
+    def __init__(self, db: Database, antibot: AntiBot, analyst: GeminiAnalyst, queue: Queue[Post]) -> None:
         self.db = db
         self.antibot = antibot
+        self.analyst = analyst
+        self.queue = queue
 
-    def fetch_updates(self):
-        for url in RSS_FEEDS:
-            self._process(url)
+    async def fetch_updates(self):
+        print("Starting fetch RSS")
+        tasks = [self._process(url) for url in RSS_FEEDS]
+        await asyncio.gather(*tasks)
 
-    def _process(self, url: str):
-        rss_data = self.antibot.get_rss_content(url)
-        
-        if rss_data is None: return
+    async def _process(self, source: str):
+        rss_data = await self.antibot.get_rss_content(source)
+        if rss_data is None: 
+            print(f"Couldnt fetch {source}")
+            return
         
         feed = feedparser.parse(rss_data)
         
-        print(f"Found {len(feed.entries)} entries in {url}:")
-        
+        print(f"Found {len(feed.entries)} entries in {source}")
+
         for entry in feed.entries:
-            links = [l.href for l in entry.links]
-            self.db.add_rss_item(url, entry.id, entry.title, entry.summary, links) # type: ignore
-            print(f"""id: {entry.id} link: {entry.link}\n{entry.title}\n{entry.summary}\n""")
+            entry_id: str = entry.id # type: ignore
+            links = [str(l.href) for l in entry.links]
+            url = entry_id if entry_id.startswith("http") else (links[0] if links else "")
+            string_content = self.get_string_content(entry)
             
-        print("\n"*3)
+            if len(string_content) > 500:
+                string_content = await self.analyst.summarise_rss(string_content) 
+                
+            if string_content is None: continue
+            
+            await self.queue.put(Post(
+                url,
+                "N/A",
+                "N/A",
+                string_content,
+                links
+            ))
+            
+            self.db.add_rss_item(source, entry_id)
+    
+    def get_string_content(self, entry: FeedParserDict) -> str:
+        all_content = []
         
+        if "summary" in entry:
+            if entry.summary_detail.type == "text/html": # type: ignore
+                all_content.append(convert(entry.summary_detail.value)) # type: ignore
+            else:
+                all_content.append(entry.summary_detail.value) # type: ignore
+        
+        if "content" in entry:
+            for content_item in entry.content:
+                if content_item.value != "" and content_item.value != entry.summary:
+                    if content_item.type == "text/html":
+                        all_content.append(convert(content_item.value)) # type: ignore
+                    else:
+                        all_content.append(content_item.value)
+        
+        return "\n".join(all_content)
             
-def main():
-    database = Database()
-    antibot = AntiBot()
-    rss_fetcher = RssFetcher(database, antibot)
-    rss_fetcher.fetch_updates()
+            
+async def main():
+    async with AntiBot() as antibot:
+        database = Database()
+        analyst = GeminiAnalyst()
+        queue = Queue()
+        rss_fetcher = RssFetcher(database, antibot, analyst, queue)
+        await rss_fetcher.fetch_updates()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

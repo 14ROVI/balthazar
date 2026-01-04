@@ -1,179 +1,151 @@
 from google import genai
-from google.genai.types import Tool, GenerateContentConfig, GoogleSearch, UrlContext
+from google.genai.types import GenerateContentConfig
 from pydantic import BaseModel, Field
 from domain.post import Post
+from datetime import datetime
+from typing import List
+import json
+from db import EventRow
 from env import GEMINI_API_KEY, GEMINI_MODEL
 
 
-class MatchResult(BaseModel):
-    signal: int = Field(description="How important this information is. 1 being the least, 10 the highest.")
-    summary: str = Field(description="A short summary that contains all relevant information in the text with no other information. This will be used for further processing to find links between data sources.")
-    financial: bool = Field(description="Should a trade happen based on this information.")
-    alertable: bool = Field(description="Should a notification be sent about this to the user if this is noteworthy news.")
+
+class EventsResult(BaseModel):
+    new_events: List[NewEvent]
+    updated_summaries: List[UpdatedSummary]
+    updated_sources: List[UpdatedSources]
+    
+class NewEvent(BaseModel):
+    summary: str = Field(..., description="Concise summary of the fact content of the event.")
+    signal: int = Field(..., description="Score 0-10 based on the reasoning above.")
+    sources: List[str] = Field(..., description="List of URLs that were the sources for this event.")
+
+class UpdatedSummary(BaseModel):
+    id: int = Field(..., description="ID of the event.")
+    summary: str = Field(..., description="Updated summary of the fact content of the event.")
+    
+class UpdatedSources(BaseModel):
+    id: int = Field(..., description="ID of the event.")
+    sources: List[str] = Field(..., description="URLs of new sources to append to the event.")
 
 
 class GeminiAnalyst:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         self.model = GEMINI_MODEL
-
-    def analyze(self, title, summary, linked_data):
+        
+    async def summarise_rss(self, rss_content) -> str | None:
         prompt = f"""
-You are a cynicism-aware Intelligence Analyst. 
-Your goal is to separate actual high-signal news from satire, rage-bait, and tech-industry sarcasm. Content you analyse may come from archives, analyse it as if it were the original source with no knowledge of the archive.
+Summarise this rss feed item into plain text to save tokens in further processing. Return only the text and nothing else. Input:
 
-CORE DIRECTIVE:
-Before classifying ANY item as "High Signal," you must first pass it through a "Satire Filter."
-
-PHASE 1: SATIRE & ABSURDITY CHECK
-Ask yourself:
-1. Is the source a known satirical outlet? (e.g., The Onion, Hard Drive, Daily Mash, New Yorker Borowitz Report).
-2. Is the headline "Too Perfect"? (e.g., "Developer Deletes Production Database to Fix Imposter Syndrome").
-3. Is it logically impossible or framing a trivial tech grievance as a global catastrophe?
-
-If YES to any of the above:
-- MARK AS SIGNAL 0
-- OUTPUT FINANCIAL AND ALERTABLE TO FALSE
-- RETURN "N/A - NOISE" AS THE SUMMARY
-
-PHASE 2: SIGNAL GRADING (Only if Phase 1 is passed)
-- Kinetic: War, troop movements, physical infrastructure failure, drone strikes, bombings, terrorism. (Signal 8-10)
-- Economic: Central bank rates, bankruptcy, new trade laws, supply chain halts. (Signal 7-10)
-- Tech: Zero-day exploits (CVEs), Model Weight releases, massive breaches. (Signal 7-10)
-These categories are not exclusive but are given as relevant examples.
-
-NOISE (Signal 0-4) -> DISCARD:
-- Opinion pieces / "Hot Takes" / Think-pieces.
-- Tutorials ("How to build X").
-- General complaints about software complexity.
-- "Show HN" projects that are minor tools.
-
-OUTPUT FORMAT, JSON ONLY:
-{{
-    "signal": <int>,
-    "financial": <bool>,
-    "alertable": <bool>,
-    "summary": "<concise_text>"
-}}
-signal: 1-10 (how important this information is. 1 being the least, 10 the highest)
-financial: true/false (should a trade happen based on this information)
-summary: text (a summary that contains all relevant information in the text ONLY. This will be used for further processing without the source so make sure to inlcude all relevant information that future analysis may need. Further analysis will be conducted for linking events together and finding large scale correlations. For efficiently, make sure to omit any and all non-relavant infomration. Amounts and numbers may be useful for quantising the scale of the event. Be consise but complete.)
-alertable: true/false
-CRITERIA FOR ALERTABLE TRUE:
-1. IMMINENT DANGER: A kinetic event, cyberattack, or financial crash is happening NOW or will happen within 48 hours.
-2. ACTION REQUIRED: The user must physically or digitally do something (e.g., "Patch this CVE," "Sell this asset," "Cancel travel to X").
-3. NOVELTY: A massive, unexpected event (e.g., "Prime Minister Resigns," "Google releases GPT-5 level model").
-CRITERIA FOR ALERTABLE FALSE (Even if High Signal):
-- Announcements of future conferences, meetings, or panels (e.g., "Speakers announced for a conference").
-- Release of "Guidance," "Best Practices," "Whitepapers," or "Strategy Documents."
-- Formation of new "partnerships," "alliances," or "working groups" without immediate action.
-- "Calls for action" or politicians "urging" something to happen.
-
-CONTEXT:
-Title and content are the title and content of the RSS feed. Linked data content contains data from links within the RSS feed.
-
---- TITLE ---
-{title}
---- CONTENT ---
-{summary}
---- LINKED DATA CONTENT ---
-{linked_data}
+{rss_content}
 """
 
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config={
-                "response_mime_type": "application/json",
-                "response_json_schema": MatchResult.model_json_schema(),
-            }
-        )
         try:
-            result = MatchResult.model_validate_json(response.text or "")
-            return result
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+            )
+            return response.text
         except Exception as e:
             print(f"Gemini Error: {e}")
-            print(response.text)
             return None
 
+    async def analyze_posts(self, current_events: List[EventRow], new_posts: List[Post]) -> EventsResult | None:
 
-    def analyze_post(self, post: Post):
+        input_json = {
+            "current_events": [
+                {
+                    "id": event.id,
+                    "summary": event.summary,
+                }
+                for event in current_events
+            ],
+            "new_posts": [
+                {
+                    "url": post.url,
+                    "content": post.content
+                } for post in new_posts
+            ]
+        }
+        
+        input_json_string = json.dumps(input_json)
+        
         prompt = f"""
-You are a cynicism-aware Intelligence Analyst. 
-Your goal is to separate actual high-signal news from satire, rage-bait, and tech-industry sarcasm. Content you analyse are posts from bluesky and mastodon seconds after posting.
+# Intelligence Analyst Task
 
-CORE DIRECTIVE:
-Before classifying ANY item as "High Signal," you must first pass it through a "Satire Filter."
+## Context
 
-PHASE 1: SATIRE & ABSURDITY CHECK
-Ask yourself:
-1. Is the source a known satirical outlet? (e.g., The Onion, Hard Drive, Daily Mash, New Yorker Borowitz Report).
-2. Is the headline "Too Perfect"? (e.g., "Developer Deletes Production Database to Fix Imposter Syndrome").
-3. Is it logically impossible or framing a trivial tech grievance as a global catastrophe?
+You are an Expert Intelligence Analyst. Your goal is to filter social media noise and aggregate ONLY high-signal events.
 
-If YES to any of the above:
-- MARK AS SIGNAL 0
-- OUTPUT FINANCIAL AND ALERTABLE TO FALSE
-- RETURN "N/A - NOISE" AS THE SUMMARY
+## Definitions
 
-PHASE 2: SIGNAL GRADING (Only if Phase 1 is passed)
-- Kinetic: War, troop movements, physical infrastructure failure, drone strikes, bombings, terrorism. (Signal 8-10)
-- Economic: Central bank rates, bankruptcy, new trade laws, supply chain halts. (Signal 7-10)
-- Tech: Zero-day exploits (CVEs), Model Weight releases, massive breaches. (Signal 7-10)
-These categories are not exclusive but are given as relevant examples.
+**High Signal Criteria (Score 7-10) - KEEP THESE:**
+- War, troop movements, physical infrastructure failure, drone strikes, bombings, terrorism, assassinations.
+- Central bank rates, sovereign bankruptcy, new trade laws, supply chain halts.
+- Zero-day exploits (CVEs > 9), Model Weight releases, massive data breaches.
 
-NOISE (Signal 0-4) -> DISCARD:
-- Opinion pieces / "Hot Takes" / Think-pieces.
-- Tutorials ("How to build X").
-- General complaints about software complexity.
+**Low Signal Criteria (Score 0-4) - DISCARD THESE:**
+- General updates, opinion pieces, recaps, tutorials.
+- Minor accidents (e.g., car crashes, road hazards).
+- Spam, NSFW content, celebrity gossip, movie/book reviews.
+- "Slow news day" commentary.
 
+## Input Data
 
-OUTPUT FORMAT, JSON ONLY:
+The user will provide a JSON object containing:
+1. "current_events": A list of events we already know about.
+2. "new_posts": A list of raw social media scrapes.
+
+## Directives (Process Step-by-Step)
+
+1. **Analyze Content First:** detailedly read the `content` of a `new_post`. 
+2. **Assign Score:** Assign a signal score based on the definitions above.
+3. **Filter:** - IF the score is less than 7, **DISCARD** the post immediately. Do not process it further.
+   - IF the score is 7 or higher, proceed to step 4.
+4. **Match or Create:**
+   - Check if this high-signal post explicitly discusses an event in `current_events`.
+   - **CRITICAL:** Do not match based on loose keywords (e.g., do not match a "Swiss agriculture" post to a "Swiss explosion" event). The facts must match.
+   - **Match:** If it matches an existing ID, add to `updated_sources`. If it changes the facts, add to `updated_summaries`.
+   - **New:** If it is high signal and NOT in the current list, add to `new_events`.
+
+## Output Format
+
+You must return **ONLY** a raw JSON object. No markdown formatting, no explanation text.
+
+Structure:
 {{
-    "signal": <int>,
-    "financial": <bool>,
-    "alertable": <bool>,
-    "summary": "<concise_text>"
+  "new_events": [ {{ "summary": "string", "signal": int, "sources": ["url"] }} ],
+  "updated_summaries": [ {{ "id": int, "summary": "string" }} ],
+    "updated_sources": [ {{ "id": int, "sources": ["url"] }} ]
 }}
-signal: 1-10 (how important this information is. 1 being the least, 10 the highest)
-financial: true/false (should a trade happen based on this information)
-summary: text (a summary that contains all relevant information in the text ONLY. This will be used for further processing without the source so make sure to inlcude all relevant information that future analysis may need. Further analysis will be conducted for linking events together and finding large scale correlations. For efficiently, make sure to omit any and all non-relavant infomration. Amounts and numbers may be useful for quantising the scale of the event. Be consise but complete.)
-alertable: true/false
-CRITERIA FOR ALERTABLE TRUE:
-1. IMMINENT DANGER: A kinetic event, cyberattack, or financial crash is happening NOW or will happen within 48 hours.
-2. ACTION REQUIRED: The user must physically or digitally do something (e.g., "Patch this CVE," "Sell this asset," "Cancel travel to X").
-3. NOVELTY: A massive, unexpected event (e.g., "Prime Minister Resigns," "Google releases GPT-5 level model").
-CRITERIA FOR ALERTABLE FALSE (Even if High Signal):
-- Announcements of future conferences, meetings, or panels (e.g., "Speakers announced for a conference").
-- Release of "Guidance," "Best Practices," "Whitepapers," or "Strategy Documents."
-- Formation of new "partnerships," "alliances," or "working groups" without immediate action.
-- "Calls for action" or politicians "urging" something to happen.
 
---- AUTHOR ---
-{post.author_display_name}
---- CONTENT ---
-{post.content}
---- LINKS ---
-{post.links}
+If no posts meet the High Signal criteria, return:
+{{
+  "new_events": [],
+  "updated_summaries": [],
+  "updated_sources": []
+}}
+
+## Input Data
+
+```json
+{input_json_string}
+```
 """
 
-        # tools = [
-        #     {"url_context": {}},
-        # ]
-        
-        response = self.client.models.generate_content(
-            model=self.model,
-            contents=prompt,
-            config=GenerateContentConfig(
-                response_mime_type="application/json",
-                response_json_schema=MatchResult.model_json_schema(),
-                # tools=tools
-            )
-        )
         try:
-            result = MatchResult.model_validate_json(response.text or "")
-            return result
+            print(prompt)
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=EventsResult.model_json_schema(),
+                )
+            )
+            if response.text is None: return None
+            return EventsResult.model_validate_json(response.text)
         except Exception as e:
             print(f"Gemini Error: {e}")
-            print(response.text)
             return None
