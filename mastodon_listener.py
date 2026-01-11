@@ -15,9 +15,7 @@ class MastodonClient:
             api_base_url="https://mastodon.social"
         )
         
-    def listen(self):
-        print("Starting listening to mastodon")
-        
+    def listen(self):       
         self.client.stream_public(
             MastodonListener(self.queue), 
             run_async=True,
@@ -46,7 +44,6 @@ class MastodonListener(StreamListener):
         post = Post(
             status.uri,
             status["account"]["acct"],
-            status["account"]["display_name"],
             convert(content),
             external_links
         )

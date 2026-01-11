@@ -14,10 +14,13 @@ class AlertSender:
         items = self.db.get_alertable_events(MIN_SIGNAL)
         async with aiohttp.ClientSession() as session:
             for item in items:
+                sources = self.db.get_event_intelligence(item.id)
+                sources_str = ">\n<".join(s.url for s in sources)
+
                 await session.post(
                     WEBHOOK_URL,
                     data = {
-                        "content": f"<@195512978634833920> signal: {item.signal} | id: {item.id}\nsummary: {item.summary}\nsources: {'\n'.join(item.sources)}"
+                        "content": f"<@195512978634833920> signal: {item.signal} | id: {item.id}\nsummary: {item.summary}\nsources: <{sources_str}>"
                     }
                 )
                 self.db.set_event_alerted(item.id)

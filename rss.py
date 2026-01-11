@@ -8,7 +8,43 @@ from asyncio import Queue
 from html_to_markdown import convert
 import feedparser
 from feedparser import FeedParserDict
+from abc import ABC, abstractmethod
+from typing import Dict
+import requests
 
+
+class BaseRssAdapter(ABC):
+    @abstractmethod
+    async def get_rss_content(self, url: str) -> str | None:
+        pass
+
+class DefaultAdapter(BaseRssAdapter):
+    def __init__(self, antibot: AntiBot) -> None:
+        super().__init__()
+        self.antibot = antibot
+
+    async def get_rss_content(self, url: str) -> str | None:
+        return await self.antibot.get_rss_content(url)
+
+class SecAdapter(BaseRssAdapter):
+    async def get_rss_content(self, url: str) -> str | None:
+        try:
+            r = requests.get(
+                url, 
+                headers={
+                    "User-Agent": "Balthazar balthazar@gmail.com",
+                    "Accept-Encoding": "gzip, deflate",
+                    "Host": "www.sec.gov"
+                }
+            )
+            return r.text
+        except:
+            return None
+
+
+ADAPTERS: Dict[str, BaseRssAdapter] = {
+    "https://www.sec.gov": SecAdapter()
+}
 
 RSS_FEEDS = [
     # congress.gov
@@ -21,6 +57,7 @@ RSS_FEEDS = [
     "https://www.sec.gov/enforcement-litigation/administrative-proceedings/rss",
     "https://www.sec.gov/news/pressreleases.rss",
     "https://www.sec.gov/enforcement-litigation/trading-suspensions/rss",
+    "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&CIK=&type=&company=&dateb=&owner=include&start=0&count=40&output=atom",
     
     # State.gov
     "https://www.state.gov/rss-feed/press-releases/feed/",
@@ -84,7 +121,8 @@ class RssFetcher:
         await asyncio.gather(*tasks)
 
     async def _process(self, source: str):
-        rss_data = await self.antibot.get_rss_content(source)
+
+        rss_data = await self._get_adapter(source).get_rss_content(source)
         if rss_data is None: 
             print(f"Couldnt fetch {source}")
             return
@@ -95,18 +133,15 @@ class RssFetcher:
 
         for entry in feed.entries:
             entry_id: str = entry.id # type: ignore
+
+            if self.db.has_rss_item(source, entry_id): continue
+
             links = [str(l.href) for l in entry.links]
             url = entry_id if entry_id.startswith("http") else (links[0] if links else "")
-            string_content = self.get_string_content(entry)
-            
-            if len(string_content) > 500:
-                string_content = await self.analyst.summarise_rss(string_content) 
-                
-            if string_content is None: continue
-            
+            string_content = await self.get_string_content(entry, url)
+
             await self.queue.put(Post(
                 url,
-                "N/A",
                 "N/A",
                 string_content,
                 links
@@ -114,7 +149,13 @@ class RssFetcher:
             
             self.db.add_rss_item(source, entry_id)
     
-    def get_string_content(self, entry: FeedParserDict) -> str:
+    def _get_adapter(self, source: str) -> BaseRssAdapter:
+        for host in ADAPTERS:
+            if source.startswith(host):
+                return ADAPTERS[host]
+        return DefaultAdapter(self.antibot)
+
+    async def get_string_content(self, entry: FeedParserDict, url: str) -> str:
         all_content = []
         
         if "summary" in entry:
@@ -130,6 +171,10 @@ class RssFetcher:
                         all_content.append(convert(content_item.value)) # type: ignore
                     else:
                         all_content.append(content_item.value)
+
+        page_content = await self.antibot.get_page(url)
+        if page_content is not None:
+            all_content.append(page_content)
         
         return "\n".join(all_content)
             

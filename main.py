@@ -7,12 +7,14 @@ from mastodon_listener import MastodonClient
 from bluesky import BlueskyClient
 from post_processor import PostProcessor
 from process_rss import RssProcessor
+import anchors
 
 from queue import SimpleQueue
 import asyncio
 import threading
 import time
 import sys
+import os
 
 FETCH_INTERVAL = 5 * 60
 ALERT_INTERVAL = 30
@@ -30,11 +32,14 @@ async def alerter_loop(alert_sender: AlertSender):
         try:
             await alert_sender.send_alerts()
         except Exception as e:
-            print(f"[Alerter Error]: {e}")
+            print(f"[Alerter Error]: {e.__repr__()}")
         await asyncio.sleep(ALERT_INTERVAL)
 
 
 async def main():
+    if not os.path.exists("high_signal_anchors.pkl"):
+        await anchors.create_anchors()
+
     async with AntiBot() as antibot:
         queue = asyncio.Queue()
         database = Database()

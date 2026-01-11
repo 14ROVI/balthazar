@@ -1,12 +1,15 @@
 from google import genai
-from google.genai.types import GenerateContentConfig
+from google.genai.types import GenerateContentConfig, EmbedContentConfig
 from pydantic import BaseModel, Field
 from domain.post import Post
 from datetime import datetime
 from typing import List
 import json
+import numpy as np
+from numpy import float64
+from numpy.typing import NDArray
 from db import EventRow
-from env import GEMINI_API_KEY, GEMINI_MODEL
+from env import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_LENGTH
 
 
 
@@ -28,28 +31,33 @@ class UpdatedSources(BaseModel):
     id: int = Field(..., description="ID of the event.")
     sources: List[str] = Field(..., description="URLs of new sources to append to the event.")
 
+class SummarisePost(BaseModel):
+    summary: str = Field(..., description="Concise summary of the fact content of the event.")
+    signal: int = Field(..., description="Score 0-10 based on the reasoning above.")
+
 
 class GeminiAnalyst:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         self.model = GEMINI_MODEL
-        
-    async def summarise_rss(self, rss_content) -> str | None:
-        prompt = f"""
-Summarise this rss feed item into plain text to save tokens in further processing. Return only the text and nothing else. Input:
 
-{rss_content}
-"""
-
+    async def get_embedding(self, content: str) -> NDArray[float64] | None:
         try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
+            response = await self.client.aio.models.embed_content(
+                model=GEMINI_EMBEDDING_MODEL,
+                contents=content,
+                config=EmbedContentConfig(
+                    output_dimensionality=GEMINI_EMBEDDING_LENGTH,
+                    task_type="SEMANTIC_SIMILARITY"
+                )
             )
-            return response.text
+            embedding_values_np = np.array(response.embeddings[0].values)
+            normed_embedding = embedding_values_np / np.linalg.norm(embedding_values_np)
+            return normed_embedding
         except Exception as e:
             print(f"Gemini Error: {e}")
             return None
+
 
     async def analyze_posts(self, current_events: List[EventRow], new_posts: List[Post]) -> EventsResult | None:
 
@@ -135,7 +143,6 @@ If no posts meet the High Signal criteria, return:
 """
 
         try:
-            print(prompt)
             response = await self.client.aio.models.generate_content(
                 model=self.model,
                 contents=prompt,
@@ -146,6 +153,71 @@ If no posts meet the High Signal criteria, return:
             )
             if response.text is None: return None
             return EventsResult.model_validate_json(response.text)
+        except Exception as e:
+            print(f"Gemini Error: {e}")
+            return None
+        
+
+    async def summarise_post(self, post_content: str) -> SummarisePost | None:
+
+        prompt = f"""
+# Intelligence Analyst Task
+
+## Context
+You are an Expert Intelligence Analyst. Your goal is to filter social media noise and aggregate ONLY high-signal events into standardized, vector-friendly summaries.
+
+## Definitions
+**High Signal Criteria (Score 7-10) - KEEP THESE:**
+- **Geopolitical acts:** War, troop movements, drone strikes, bombings, confirmed terrorism, assassinations.
+- **Economic/Cyber:** Central bank rates, sovereign bankruptcy, new trade laws, supply chain halts, Zero-day exploits (CVEs > 9), Model Weight releases, massive data breaches.
+- **Critical Infrastructure:** Total physical infrastructure failure (e.g., grid collapse, dam failure) affecting a large region.
+
+**Low Signal Criteria (Score 0-4) - DISCARD THESE:**
+- General updates, opinion pieces, recaps, tutorials.
+- **Civilian Accidents & Disasters:** Plane crashes, train derailments, fires, or natural disasters **UNLESS** there is immediate confirmation of terrorism, an act of war, or it involves a Head of State.
+- Spam, NSFW content, celebrity gossip, movie/book reviews.
+- "Slow news day" commentary.
+- Singular domestic events (local crime, protests without national impact).
+
+## Directives (Process Step-by-Step)
+1. **Analyze Content:** Detailedly read the content.
+2. **Assign Score:** Assign a signal score based on the definitions above.
+3. **Filter:** IF the score is less than 6, **DISCARD** the post immediately. Return an empty string summary and signal 0.
+4. **Standardize & Summarize:** IF the score is more than 6, create a summary optimized for vector clustering:
+   - **Entity Normalization:** Use the most specific, universally recognized name for entities.
+   - **Syntax:** strict **[Subject] [Action] [Object]** format.
+   - **Tone:** Clinical and dry. Remove all adjectives (e.g., "shocking", "massive") unless defining the scale (e.g., "7.8 magnitude").
+   - *Example:* "Trump suggests buying Greenland." (Not: "The US President has discussed the idea of purchasing Greenland.")
+5. **RETHINK SIGNAL:** Rescore based on the boring summary. If it no longer seems critical, discard.
+
+## Output Format
+
+You must return **ONLY** a raw JSON object. No markdown formatting, no explanation text.
+
+Structure:
+{{ "summary": "string", "signal": int }} ],
+
+If no posts meet the High Signal criteria, return:
+{{ "summary": "", "signal": 0 }}
+
+## Input Data
+
+```md
+{post_content}
+```
+"""
+
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_json_schema=SummarisePost.model_json_schema(),
+                )
+            )
+            if response.text is None: return None
+            return SummarisePost.model_validate_json(response.text)
         except Exception as e:
             print(f"Gemini Error: {e}")
             return None

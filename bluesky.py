@@ -45,7 +45,6 @@ class BlueskyClient:
                     
                     post = Post(
                         f"https://bsky.app/profile/{did}/post/{rkey}",
-                        "Unavailable Bluesky Username",
                         did,
                         data["commit"]["record"]["text"],
                         links
