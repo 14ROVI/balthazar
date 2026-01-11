@@ -1,114 +1,122 @@
-from playwright.sync_api import sync_playwright
-from playwright.sync_api import TimeoutError
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright, Browser
+from html_to_markdown import convert
+import asyncio
+
 
 class AntiBot:
     def __init__(self) -> None:
-        self.rss_content: str | None = None
+        self.playwright = None
+        self.browser = None
         
-    def get_rss_content(self, url: str) -> str | None:
-        self.rss_content = None
+    async def __aenter__(self):
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--headless=new",
+                "--disable-blink-features=AutomationControlled", 
+                "--no-sandbox",
+                "--disable-http2", 
+                "--dns-result-order=ipv4first",
+                "--window-size=1920,1080",
+                "--start-maximized"
+            ],
+            ignore_default_args=["--enable-automation"]
+        )
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+            
+    def _get_browser(self) -> Browser:
+        if self.browser is None:
+            raise Exception("Browser not initialised. use `async with AntiBot() as antibot:`")
+        return self.browser
+    
+    
         
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True, 
-                args=[
-                    "--disable-blink-features=AutomationControlled", 
-                    "--no-sandbox"
-                ]
-            )
-            
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            )
-            
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+    async def get_rss_content(self, url: str) -> str | None:
+        context = await self._get_browser().new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        page = await context.new_page()
 
-            page = context.new_page()
-
-            page.on("response", self.handle_response(url))
-            
-            page.goto(url)
+        rss_content = None
+        async def handle_response(response):
+            nonlocal rss_content
+            try:
+                if response.status == 200:
+                    ctype = response.headers.get("content-type", "").lower()
+                    if "xml" in ctype or "rss" in ctype: 
+                        rss_content = await response.text()
+            except:
+                pass
+        
+        try:
+            page.on("response", handle_response)
+            await page.goto(url)
             
             try:
                 robot_btn = page.get_by_text("robot")
-                robot_btn.wait_for(state="visible", timeout=3000)
-                robot_btn.click()
-            except TimeoutError:
+                await robot_btn.wait_for(state="visible", timeout=3000)
+                await robot_btn.click()
+            except:
                 pass
             
             try:
-                page.wait_for_function("document.body.innerText.includes('<rss') || document.body.innerText.includes('<?xml')", timeout=3000)
-            except Exception:
-                print("RSS not found")
-                return None
-                
-            page.wait_for_load_state("networkidle")
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except:
+                pass
+        finally:
+            await page.close()
+            await context.close()
             
-            browser.close()
+        return rss_content
 
-            return self.rss_content
+
+    async def get_page(self, url: str) -> str | None:
+        context = await self._get_browser().new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+        )
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        await context.route("**/*", lambda route: route.abort() 
+            if any(x in route.request.url for x in ["doubleclick", "adsystem", "analytics", "facebook", "twitter"]) 
+            else route.continue_()
+        )
+        page = await context.new_page()
         
-    def get_page(self, target_url) -> str:
-        
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True, 
-                args=[
-                    "--disable-blink-features=AutomationControlled", 
-                    "--no-sandbox"
-                ]
-            )
-            
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
-            )
-            
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-            page = context.new_page()
-
-            page.goto(target_url)
+        try:
+            await page.goto(url)
             
             try:
                 robot_btn = page.get_by_text("robot")
-                robot_btn.wait_for(state="visible", timeout=3000)
-                robot_btn.click()
-            except Exception:
+                await robot_btn.wait_for(state="visible", timeout=3000)
+                await robot_btn.click()
+            except:
                 pass
             
             try:
-                page.wait_for_load_state("networkidle", timeout=10000)
-            except Exception:
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+                html_content = await page.content()
+                return convert(html_content)
+            except:
                 pass
+        finally:
+            await page.close()
+            await context.close()
             
-            html_content = page.content()
-            body_visible_text = page.inner_text("body")
-            
-            browser.close()
-            
-            soup = BeautifulSoup(html_content, 'html.parser')
-            
-            def get_meta(tag_name, attrs_dict):
-                found = soup.find(tag_name, attrs=attrs_dict)
-                return found["content"] if found and "content" in found.attrs else ""
+        return None
 
-            meta_data = {
-                "title": soup.title.string if soup.title else "",
-                "og_title": get_meta("meta", {"property": "og:title"}),
-                "og_description": get_meta("meta", {"property": "og:description"}),
-                "twitter_card": get_meta("meta", {"name": "twitter:card"}),
-                "twitter_description": get_meta("meta", {"name": "twitter:description"}),
-            }
 
-            return str(meta_data) + body_visible_text
-        
-            
-    def handle_response(self, target_url):
-        def handle_response(response):
-            if target_url in response.url and response.status == 200:
-                ctype = response.headers.get("content-type", "").lower()
-                if "xml" in ctype: 
-                    self.rss_content = response.text()
-        
-        return handle_response
+async def main():    
+    async with AntiBot() as antibot:
+        a = await antibot.get_rss_content("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&CIK=&type=&company=&dateb=&owner=include&start=0&count=40&output=atom")
+        print(a)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

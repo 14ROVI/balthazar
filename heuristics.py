@@ -18,6 +18,7 @@ IGNORE_DOMAINS = {
     "rss-parrot.net",
     "newsbeep.com",
     "newsbeep.org",
+    "washingtonpost.com",
 }
 
 SHORTLIST_ACCOUNTS = {
@@ -49,7 +50,7 @@ KEYWORDS = {
     # English
     "explosion", "missile", "airstrike", "troops", "invaded", "coup", 
     "rioting", "emergency declared", "breaking", "invades", "invade"
-    "peace",
+    "peace", "capture", "forces", "raid",
     # Ukrainian
     "вибух", "ракетний удар", "повітряна тривога", "вторгнення", 
     "обстріл", "ЗСУ", "втрати", "загинули", "наступ", "фронт", 
@@ -94,7 +95,22 @@ KEYWORDS = {
 IGNORE_KEYWORDS = {
     "opinion:", "satire", "humor", "cartoon", "ask hn:", "tell hn:",
     "#ad", "#amazon", "#memes", "breaking bad", "#crypto", "#commission",
-    "#digtaldrawing", "#art", "#gay", "leaky", "WIP"
+    "#digtaldrawing", "#art", "#gay", "leaky", "WIP", "star wars",
+    "#bdsm", "#bondage", "kink", "#selfship", "#yume", "#zzz", 
+    "zenlesszonezero", "#poetry", "fireren", "#horny",
+    # Commercial / Spam / Crypto
+    "#sponsored", "#partner", "giveaway", "nft", "web3", "airdrop", 
+    "affiliate", "promo", "discount", "dropshipping",
+    # Expanded Art / Fandom / Gacha
+    "fanart", "fanfic", "cosplay", "vtuber", "gacha", "genshin", 
+    "honkai", "star rail", "waifu", "oc", "original character",
+    "commissions open", "sketch", "doodle", "ych", "adoptable",
+    # Social Noise / Engagement Bait
+    "thread 🧵", "follow for more", "link in bio", "hot take",
+    "sesame street", "the muppet",
+    # Broad NSFW
+    "nsfw", "18+", "lewd", "onlyfans", "porn", "hentai", "linktr.ee",
+    "e926"
 }
 
 def is_obvious_noise(title: str, url: str) -> bool:
@@ -115,16 +131,16 @@ def should_process_post(post: Post) -> bool:
         return False
     
     for domain in IGNORE_DOMAINS:
-        if domain in post.url:
+        if domain in post.url.lower():
             return False
         for link in post.links:
-            if domain in link:
+            if domain in link.lower():
                 return False
     
-    if any(kw in post.content for kw in IGNORE_KEYWORDS):
+    if any(kw in post.content.lower() for kw in IGNORE_KEYWORDS):
         return False
     
-    if any(kw in post.content for kw in KEYWORDS):
+    if any(kw in post.content.lower() for kw in KEYWORDS):
         return True
     
     return False

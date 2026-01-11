@@ -1,33 +1,31 @@
 from mastodon import Mastodon, StreamListener
-from queue import SimpleQueue
+
+import asyncio
 from domain.post import Post
 from html_to_markdown import convert
-import time
 from bs4 import BeautifulSoup
 from env import MASTODON_ACCESS_TOKEN
 
 
 class MastodonClient:
-    def __init__(self, queue: SimpleQueue[Post]) -> None:
+    def __init__(self, queue: asyncio.Queue[Post]) -> None:
         self.queue = queue
         self.client = Mastodon(
             access_token=MASTODON_ACCESS_TOKEN,
             api_base_url="https://mastodon.social"
         )
         
-    def listen(self):
-        print("Listening to mastodon")
-        
-        while True:
-            try:
-                self.client.stream_public(MastodonListener(self.queue))
-            except Exception as e:
-                print(f"Mastodon stream died: {e}. Restarting in 5s...")
-                time.sleep(5)
+    def listen(self):       
+        self.client.stream_public(
+            MastodonListener(self.queue), 
+            run_async=True,
+            reconnect_async=True
+        )
+                
         
 
 class MastodonListener(StreamListener):
-    def __init__(self, queue: SimpleQueue[Post]) -> None:
+    def __init__(self, queue: asyncio.Queue[Post]) -> None:
         super().__init__()
         self.queue = queue
         
@@ -46,18 +44,17 @@ class MastodonListener(StreamListener):
         post = Post(
             status.uri,
             status["account"]["acct"],
-            status["account"]["display_name"],
             convert(content),
             external_links
         )
-        # print(status["account"])
-        self.queue.put(post)
+        
+        self.queue.put_nowait(post)
 
 
 def main():
-    client = MastodonClient(SimpleQueue())
+    queue = asyncio.Queue()
+    client = MastodonClient(queue)
     client.listen()
-    
 
 if __name__ == "__main__":
     main()

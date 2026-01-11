@@ -7,97 +7,62 @@ from mastodon_listener import MastodonClient
 from bluesky import BlueskyClient
 from post_processor import PostProcessor
 from process_rss import RssProcessor
+import anchors
 
 from queue import SimpleQueue
-from typing import Tuple
+import asyncio
 import threading
 import time
 import sys
+import os
 
 FETCH_INTERVAL = 5 * 60
-PROCESS_INTERVAL = 30
 ALERT_INTERVAL = 30
 
-def fetcher_loop():
-    db = Database()
-    antibot = AntiBot()
-    fetcher = RssFetcher(db, antibot)
-    
+async def fetcher_loop(fetcher: RssFetcher):
     while True:
         try:
-            fetcher.fetch_updates()
+            await fetcher.fetch_updates()
         except Exception as e:
-            print(f"❌ [Fetcher Error]: {e}")
-        
-        time.sleep(FETCH_INTERVAL)
-        
-def processor_loop():
-    database = Database()
-    antibot = AntiBot()
-    analyst = GeminiAnalyst()
-    rss_processor = RssProcessor(database, antibot, analyst)
-    
+            print(f"[Fetcher Error]: {e}")    
+        await asyncio.sleep(FETCH_INTERVAL)
+
+async def alerter_loop(alert_sender: AlertSender):
     while True:
         try:
-            rss_processor.process()
+            await alert_sender.send_alerts()
         except Exception as e:
-            print(f"❌ [Processor Error]: {e}")
-        
-        time.sleep(PROCESS_INTERVAL)
-        
-def alerter_loop():
-    database = Database()
-    alert_sender = AlertSender(database)
-    
-    while True:
-        try:
-            alert_sender.send_alerts()
-        except Exception as e:
-            print(f"❌ [Alerter Error]: {e}")
-        
-        time.sleep(ALERT_INTERVAL)
-        
-def fetch_and_process_posts():
-    queue = SimpleQueue()
-    
-    mastodon_client = MastodonClient(queue)
-    bluesky_client = BlueskyClient(queue)
-    
-    t_mastodon_listen = threading.Thread(target=mastodon_client.listen, name="Mastodon Firehose", daemon=True)
-    t_bluesky_listen = threading.Thread(target=bluesky_client.listen, name="BlueSky Firehose", daemon=True)
-    t_process_queue = threading.Thread(target=process_posts, name="Mastodon Firehose", args=[queue], daemon=True)
-    
-    t_mastodon_listen.start()
-    t_bluesky_listen.start()
-    t_process_queue.start()
-    
-def process_posts(queue: SimpleQueue):
-    database = Database()
-    analyst = GeminiAnalyst()
-    processor = PostProcessor(database, analyst, queue)
-    
-    processor.process_queue()
-    
-    
+            print(f"[Alerter Error]: {e.__repr__()}")
+        await asyncio.sleep(ALERT_INTERVAL)
 
-def main():
-    t_fetch = threading.Thread(target=fetcher_loop, name="Fetcher", daemon=True)
-    t_process = threading.Thread(target=processor_loop, name="Processor", daemon=True)
-    t_alert = threading.Thread(target=alerter_loop, name="Alerter", daemon=True)
 
-    t_fetch.start()
-    t_process.start()
-    t_alert.start()
+async def main():
+    if not os.path.exists("high_signal_anchors.pkl"):
+        await anchors.create_anchors()
+
+    async with AntiBot() as antibot:
+        queue = asyncio.Queue()
+        database = Database()
+        analyst = GeminiAnalyst()
     
-    fetch_and_process_posts()
-
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down pipeline...")
-        sys.exit(0)
-
+        rss_client = RssFetcher(database, antibot, analyst, queue)
+        mastodon_client = MastodonClient(queue)
+        bluesky_client = BlueskyClient(queue)
+    
+        processor = PostProcessor(database, analyst, queue)
+        
+        alerter = AlertSender(database)
+    
+        tasks = [
+            asyncio.create_task(fetcher_loop(rss_client)),
+            asyncio.create_task(bluesky_client.listen()),
+            asyncio.create_task(processor.process_queue()),
+            asyncio.create_task(alerter_loop(alerter)),
+        ]
+        
+        mastodon_client.listen()
+        
+        await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

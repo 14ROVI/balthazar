@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from typing import List
+from datetime import datetime
 
 @dataclass
-class Post:
+class RssItem:
     url: str
-    author_id: str
+    title: str
     content: str
     links: List[str]
-    
+    added: datetime | None
+    processed: datetime | None
