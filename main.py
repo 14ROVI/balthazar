@@ -6,14 +6,9 @@ from ai_engine import GeminiAnalyst
 from mastodon_listener import MastodonClient
 from bluesky import BlueskyClient
 from post_processor import PostProcessor
-from process_rss import RssProcessor
 import anchors
 
-from queue import SimpleQueue
 import asyncio
-import threading
-import time
-import sys
 import os
 
 FETCH_INTERVAL = 5 * 60

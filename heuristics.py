@@ -105,9 +105,10 @@ IGNORE_KEYWORDS = {
     "fanart", "fanfic", "cosplay", "vtuber", "gacha", "genshin", 
     "honkai", "star rail", "waifu", "oc", "original character",
     "commissions open", "sketch", "doodle", "ych", "adoptable",
+    "Wordle", "ffxiv",
     # Social Noise / Engagement Bait
     "thread 🧵", "follow for more", "link in bio", "hot take",
-    "sesame street", "the muppet",
+    "sesame street", "the muppet", "booksky",
     # Broad NSFW
     "nsfw", "18+", "lewd", "onlyfans", "porn", "hentai", "linktr.ee",
     "e926"

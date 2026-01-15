@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from domain.post import Post
 from datetime import datetime
 from typing import List
+import re
 import json
 import numpy as np
 from numpy import float64
@@ -41,16 +42,21 @@ class GeminiAnalyst:
         self.client = genai.Client(api_key=GEMINI_API_KEY)
         self.model = GEMINI_MODEL
 
-    async def get_embedding(self, content: str) -> NDArray[float64] | None:
+    async def get_embedding(self, post: Post) -> NDArray[float64] | None:
+        clean_post_content = self._clean_for_embedding(post.content)
+
+        payload = f"Post by author {post.author_id} with content: {clean_post_content}"
+
         try:
             response = await self.client.aio.models.embed_content(
                 model=GEMINI_EMBEDDING_MODEL,
-                contents=content,
+                contents=payload,
                 config=EmbedContentConfig(
                     output_dimensionality=GEMINI_EMBEDDING_LENGTH,
-                    task_type="SEMANTIC_SIMILARITY"
+                    task_type="CLASSIFICATION"
                 )
             )
+            if response.embeddings is None: return None
             embedding_values_np = np.array(response.embeddings[0].values)
             normed_embedding = embedding_values_np / np.linalg.norm(embedding_values_np)
             return normed_embedding
@@ -58,6 +64,32 @@ class GeminiAnalyst:
             print(f"Gemini Error: {e}")
             return None
 
+
+    def _clean_for_embedding(self, text: str) -> str:
+        text = text.replace("\n", " ")
+        # 1. STRIP MARKDOWN LINKS: [Text](url) -> Text
+        # Captures the text inside [], ignores the () part
+        text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
+
+        # 2. STRIP IMAGES: ![Alt](url) -> "" (Or keep alt text if you prefer)
+        text = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text)
+
+        # 3. NUKE RAW URLS: https://... -> ""
+        # URLs confuse semantic models.
+        text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
+
+        # 4. FIX HASHTAGS: #WarInVenezuela -> War In Venezuela
+        def split_hashtag(match):
+            tag = match.group(0)[1:] # Remove #
+            # Split CamelCase: "WarInVenezuela" -> "War In Venezuela"
+            return " " + " ".join(re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)', tag))
+        
+        text = re.sub(r'#[A-Za-z0-9_]+', split_hashtag, text)
+
+        # 5. CLEAN WHITESPACE
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        return text
 
     async def analyze_posts(self, current_events: List[EventRow], new_posts: List[Post]) -> EventsResult | None:
 

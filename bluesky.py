@@ -49,7 +49,16 @@ class BlueskyClient:
                         data["commit"]["record"]["text"],
                         links
                     )
-                    
+
                     await self.queue.put(post)
                 except:
                     continue
+
+
+async def main():
+    queue = asyncio.Queue()
+    bluesky = BlueskyClient(queue)
+    await bluesky.listen()
+
+if __name__ == "__main__":
+    asyncio.run(main())

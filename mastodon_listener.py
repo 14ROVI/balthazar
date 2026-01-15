@@ -47,7 +47,7 @@ class MastodonListener(StreamListener):
             convert(content),
             external_links
         )
-        
+
         self.queue.put_nowait(post)
 
 
