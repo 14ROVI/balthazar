@@ -103,6 +103,10 @@ RSS_FEEDS = [
     "https://bills.parliament.uk/rss/allbills.rss",
     "https://www.ncsc.gov.uk/api/1/services/v1/news-rss-feed.xml",
     "https://www.ncsc.gov.uk/api/1/services/v1/report-rss-feed.xml",
+    "https://www.gov.uk/government/organisations/ministry-of-defence.atom",
+
+    # UK Defence journal
+    "https://ukdefencejournal.org.uk/feed/",
     
     # donald trump truth social
     "https://trumpstruth.org/feed",
