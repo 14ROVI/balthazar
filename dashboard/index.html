@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Balthazar Trading Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/apexcharts"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+        }
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 20px;
+            max-width: 1600px;
+            margin: auto;
+            height: 90vh;
+        }
+        .chart-container {
+            background-color: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        #price-chart-container {
+            grid-column: 1 / 2;
+            grid-row: 1 / 3;
+        }
+        #sentiment-pie-container {
+            grid-column: 2 / 3;
+            grid-row: 1 / 2;
+        }
+        #sentiment-rolling-container {
+            grid-column: 2 / 3;
+            grid-row: 2 / 3;
+        }
+        h2 {
+            margin-top: 0;
+            font-weight: 500;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="dashboard-container">
+        <div class="chart-container" id="price-chart-container">
+            <h2>Silver Price & Internet Sentiment</h2>
+            <div id="price-sentiment-chart"></div>
+        </div>
+        <div class="chart-container" id="sentiment-pie-container">
+            <h2>1-Hour Sentiment Breakdown</h2>
+            <div id="sentiment-pie-chart"></div>
+        </div>
+        <div class="chart-container" id="sentiment-rolling-container">
+            <h2>24-Hour Rolling Sentiment (%)</h2>
+            <div id="sentiment-rolling-chart"></div>
+        </div>
+    </div>
+
+    <script>
+        // --- Chart Options ---
+        const commonChartOptions = {
+            chart: {
+                background: '#1e1e1e',
+                foreColor: '#e0e0e0',
+                toolbar: { show: true },
+                zoom: { enabled: true }
+            },
+            grid: { borderColor: '#444' },
+            tooltip: { 
+                theme: 'dark',
+                x: { format: 'dd MMM yyyy HH:mm' }
+            },
+            xaxis: {
+                type: 'datetime',
+                labels: { datetimeUTC: false }
+            },
+        };
+
+        // --- Chart Initialization ---
+        const priceSentimentChart = new ApexCharts(document.querySelector("#price-sentiment-chart"), {
+            ...commonChartOptions,
+            series: [],
+            chart: { 
+                ...commonChartOptions.chart, 
+                type: 'line',
+                stacked: false // Important for mixed charts
+            },
+            stroke: {
+                width: [2, 1, 1], // Price line, buy bars, sell bars
+                curve: 'smooth'
+            },
+            plotOptions: {
+                bar: {
+                    columnWidth: '50%',
+                    stacked: true
+                }
+            },
+            colors: ['#00BFFF', '#00E396', '#FF4560'], // Price, Buys, Sells
+            yaxis: [
+                {
+                    // Primary Y-axis for Price
+                    seriesName: 'Price',
+                    axisTicks: { show: true },
+                    axisBorder: { show: true, color: '#00BFFF' },
+                    labels: {
+                        style: { colors: '#00BFFF' },
+                        formatter: (val) => `$${val.toFixed(2)}`
+                    },
+                    title: {
+                        text: "Price (USD)",
+                        style: { color: '#00BFFF' }
+                    }
+                },
+                {
+                    // Secondary Y-axis for Sentiment Volume
+                    seriesName: 'Buy', // Linked to Buy and Sell series
+                    opposite: true,
+                    min: 0, // Ensure the axis starts at 0
+                    axisTicks: { show: true },
+                    axisBorder: { show: true, color: '#00E396' },
+                    labels: {
+                        style: { colors: '#00E396' },
+                        formatter: (val) => val.toFixed(0)
+                    },
+                    title: {
+                        text: "Sentiment Volume",
+                        style: { color: '#00E396' }
+                    },
+                    max: (max) => max * 1.5 // Give some headroom
+                }
+            ],
+            noData: { text: 'Loading Data...' }
+        });
+        priceSentimentChart.render();
+
+        const sentimentPieChart = new ApexCharts(document.querySelector("#sentiment-pie-chart"), {
+            series: [],
+            chart: { type: 'pie', foreColor: '#e0e0e0' },
+            labels: ['Buy', 'Sell', 'Hold'],
+            colors: ['#00E396', '#FF4560', '#777777'],
+            legend: { position: 'bottom' },
+            noData: { text: 'Loading Sentiment Data...' },
+            tooltip: { theme: 'dark' }
+        });
+        sentimentPieChart.render();
+
+        const sentimentRollingChart = new ApexCharts(document.querySelector("#sentiment-rolling-chart"), {
+            ...commonChartOptions,
+            dataLabels: {
+                enabled: false,
+                formatter: function(val) {
+                    return val.toFixed(0);
+                }
+            },
+            series: [],
+            chart: {
+                ...commonChartOptions.chart,
+                type: 'area', // Changed to area
+                stacked: true // Stack the series
+            },
+            colors: ['#00E396', '#FF4560', '#777777'], // Buy, Sell, Hold
+            stroke: {
+                width: 2,
+                curve: 'smooth'
+            },
+            yaxis: {
+                min: 0,
+                max: 100,
+                labels: {
+                    formatter: (val) => `${val.toFixed(0)}%`
+                },
+                title: { text: 'Sentiment Percentage' }
+            },
+            tooltip: {
+                y: {
+                    formatter: (val) => `${val.toFixed(0)}%`
+                }
+            },
+            noData: { text: 'Loading Rolling Sentiment...' }
+        });
+        sentimentRollingChart.render();
+
+
+        // --- Data Fetching and Updating ---
+        async function fetchData() {
+            try {
+                const [priceResponse, sentimentResponse] = await Promise.all([
+                    fetch('/api/price-history'),
+                    fetch('/api/sentiment')
+                ]);
+
+                if (!priceResponse.ok || !sentimentResponse.ok) {
+                    throw new Error('Network response was not ok');
+                }
+
+                const priceData = await priceResponse.json();
+                const sentimentData = await sentimentResponse.json();
+
+                // Update Price and Sentiment Volume Chart
+                if (priceData.prices && sentimentData.volume_chart) {
+                    priceSentimentChart.updateSeries([
+                        { name: 'Price', type: 'line', data: priceData.prices },
+                        { name: 'Buy', type: 'bar', data: sentimentData.volume_chart.map(d => [d.x, d.y_buy]) },
+                        { name: 'Sell', type: 'bar', data: sentimentData.volume_chart.map(d => [d.x, d.y_sell]) }
+                    ]);
+                }
+
+                // Update Sentiment Pie Chart
+                if (sentimentData.pie_chart) {
+                    sentimentPieChart.updateSeries([
+                        sentimentData.pie_chart.BUY,
+                        sentimentData.pie_chart.SELL,
+                        sentimentData.pie_chart.HOLD
+                    ]);
+                }
+
+                // Update Rolling Sentiment Chart
+                if (sentimentData.rolling_sentiment) {
+                    sentimentRollingChart.updateSeries([
+                        { name: 'Buy %', data: sentimentData.rolling_sentiment.map(d => [d.x, d.y_buy]) },
+                        { name: 'Sell %', data: sentimentData.rolling_sentiment.map(d => [d.x, d.y_sell]) },
+                        { name: 'Hold %', data: sentimentData.rolling_sentiment.map(d => [d.x, d.y_hold]) }
+                    ]);
+                }
+
+            } catch (error) {
+                console.error('Error fetching data:', error);
+            }
+        }
+
+        // Fetch data on initial load and then every 60 seconds
+        fetchData();
+        setInterval(fetchData, 60000);
+    </script>
+
+</body>
+</html>

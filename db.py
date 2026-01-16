@@ -34,9 +34,16 @@ class EventRow:
     added: int
     last_updated: int
 
+@dataclass
+class HistoricalSignalRow:
+    url: str
+    embedding: NDArray[float64]
+    signal: str
+    added: int
+
 
 class Database:
-    def __init__(self) -> None:
+    def __init__(self):
         self.conn = sqlite3.connect(DB_NAME)
         self.conn.row_factory = sqlite3.Row
 
@@ -82,6 +89,16 @@ class Database:
         c.execute("CREATE INDEX IF NOT EXISTS idx_last_updated ON events (last_updated)")
         c.execute(f"SELECT vector_init('events', 'embedding', 'dimension={GEMINI_EMBEDDING_LENGTH},type=FLOAT32,distance=cosine')")
 
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS historical_signals (
+                url TEXT PRIMARY KEY,
+                embedding BLOB,
+                signal TEXT,
+                added INTEGER DEFAULT (unixepoch())
+            )
+        """)
+        c.execute(f"SELECT vector_init('historical_signals', 'embedding', 'dimension={GEMINI_EMBEDDING_LENGTH},type=FLOAT32,distance=cosine')")
+
         self.conn.commit()
 
 
@@ -105,7 +122,17 @@ class Database:
         return bool(c.fetchone()[0])
     
 
-    ## RSS ITEMS
+    ## HISTORICAL SIGNALS
+
+    def add_historical_signal(self, url: str, embedding: NDArray[float64], signal: str):
+        """Adds a generated signal to the historical log for backtesting."""
+        c = self.conn.cursor()
+        c.execute("""
+            INSERT OR IGNORE INTO historical_signals (url, embedding, signal)
+            VALUES (?, vector_as_f32(?), ?)""",
+            (url, embedding.astype('float32').tobytes(), signal)
+        )
+        self.conn.commit()
 
     def add_intelligence(self, url: str, content: str, embedding: NDArray[float64]):
         c = self.conn.cursor()
@@ -124,20 +151,22 @@ class Database:
         )
         self.conn.commit()
 
+
     def get_event_intelligence(self, event_id: int) -> List[IntelligenceRow]:
         c = self.conn.cursor()
         c.execute(
             "SELECT rowid, * FROM intelligence WHERE event = ?",
             (event_id, )
         )
-        
+
         return [_to_intelligence_row(row) for row in c.fetchall()]
-        
+
     def get_all_embeddings(self) -> List[IntelligenceRow]:
         c = self.conn.cursor()
         c.execute("SELECT rowid, * FROM intelligence")
         return [_to_intelligence_row(row) for row in c.fetchall()]
     
+
     def get_closest_intelligence(self, embedding: NDArray[float64], amount: float, min_timestamp: int) -> List[tuple[IntelligenceRow, float]]:
         c = self.conn.cursor()
         c.execute("""
@@ -153,9 +182,9 @@ class Database:
         )
         return [(_to_intelligence_row(row), row["distance"]) for row in c.fetchall()]
 
-    
+
     ## EVENTS
-        
+
     def add_event(self, summary: str, signal: int, embedding: NDArray[float64]):
         c = self.conn.cursor()
         c.execute(
@@ -165,7 +194,7 @@ class Database:
         row = _to_event_row(c.fetchone())
         self.conn.commit()
         return row
-        
+
     def update_event_summary(self, id: int, summary: str):
         c = self.conn.cursor()
         c.execute(
@@ -173,7 +202,7 @@ class Database:
             (summary, id)
         )
         self.conn.commit()
-        
+
     def get_alertable_events(self, min_signal: int) -> List[EventRow]:
         c = self.conn.cursor()
         c.execute("""
@@ -182,9 +211,8 @@ class Database:
             WHERE signal > ? AND alerted = FALSE""",
             (min_signal, )
         )
-        
         return [_to_event_row(row) for row in c.fetchall()]
-        
+
     def set_event_alerted(self, id: int, alerted: bool = True):
         c = self.conn.cursor()
         c.execute(
@@ -202,9 +230,9 @@ class Database:
             ORDER BY last_updated DESC""",
             (min_timestamp, )
         )
-        
+
         return [_to_event_row(row) for row in c.fetchall()]
-    
+
     def get_closest_events(self, embedding: NDArray[float64], amount: int) -> List[tuple[EventRow, float]]:
         c = self.conn.cursor()
         c.execute("""
@@ -218,13 +246,32 @@ class Database:
         )
 
         return [(_to_event_row(row), row["distance"]) for row in c.fetchall()]
-    
+
     def clear_events(self):
         c = self.conn.cursor()
         c.execute("DELETE FROM events WHERE 1=1")
         c.execute("UPDATE intelligence SET event = NULL WHERE 1=1")
         self.conn.commit()
 
+    def get_signals_since(self, timestamp: int) -> List[HistoricalSignalRow]:
+        """Fetches all historical signals after a given timestamp."""
+        c = self.conn.cursor()
+        c.execute(
+            "SELECT * FROM historical_signals WHERE added > ?",
+            (timestamp,)
+        )
+
+        return [_to_historical_signal_row(row) for row in c.fetchall()]
+
+
+
+def _to_historical_signal_row(row: sqlite3.Row) -> HistoricalSignalRow:
+    return HistoricalSignalRow(
+        row["url"],
+        np.frombuffer(row["embedding"], dtype=np.float32),
+        row["signal"],
+        row["added"]
+    )
 
 def _to_intelligence_row(row: sqlite3.Row) -> IntelligenceRow:
     return IntelligenceRow(
@@ -234,7 +281,7 @@ def _to_intelligence_row(row: sqlite3.Row) -> IntelligenceRow:
         np.frombuffer(row["embedding"], dtype=float64),
         row["event"]
     )
-    
+
 def _to_event_row(row: sqlite3.Row) -> EventRow:
     return EventRow(
         row["id"],

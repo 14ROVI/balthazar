@@ -1,56 +1,55 @@
 from google import genai
-from google.genai.types import GenerateContentConfig, EmbedContentConfig
-from pydantic import BaseModel, Field
+from google.genai.types import EmbedContentConfig
 from domain.post import Post
-from datetime import datetime
 from typing import List
 import re
-import json
 import numpy as np
 from numpy import float64
 from numpy.typing import NDArray
-from db import EventRow
-from env import GEMINI_API_KEY, GEMINI_MODEL, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_LENGTH
+import joblib
+from strategy import Signal
 
+from env import GEMINI_API_KEY, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_LENGTH
 
-
-class EventsResult(BaseModel):
-    new_events: List[NewEvent]
-    updated_summaries: List[UpdatedSummary]
-    updated_sources: List[UpdatedSources]
+def cosine_similarity(v1, v2):
+    """Calculate cosine similarity between two vectors."""
+    # Ensure vectors are numpy arrays and not None
+    if v1 is None or v2 is None:
+        return 0.0
+    v1 = np.array(v1)
+    v2 = np.array(v2)
+    if v1.shape != v2.shape:
+        # Or handle this error more gracefully
+        raise ValueError("Vectors must have the same shape.")
     
-class NewEvent(BaseModel):
-    summary: str = Field(..., description="Concise summary of the fact content of the event.")
-    signal: int = Field(..., description="Score 0-10 based on the reasoning above.")
-    sources: List[str] = Field(..., description="List of URLs that were the sources for this event.")
-
-class UpdatedSummary(BaseModel):
-    id: int = Field(..., description="ID of the event.")
-    summary: str = Field(..., description="Updated summary of the fact content of the event.")
+    dot_product = np.dot(v1, v2)
+    norm_v1 = np.linalg.norm(v1)
+    norm_v2 = np.linalg.norm(v2)
     
-class UpdatedSources(BaseModel):
-    id: int = Field(..., description="ID of the event.")
-    sources: List[str] = Field(..., description="URLs of new sources to append to the event.")
-
-class SummarisePost(BaseModel):
-    summary: str = Field(..., description="Concise summary of the fact content of the event.")
-    signal: int = Field(..., description="Score 0-10 based on the reasoning above.")
-
+    if norm_v1 == 0 or norm_v2 == 0:
+        return 0.0
+        
+    return dot_product / (norm_v1 * norm_v2)
 
 class GeminiAnalyst:
     def __init__(self):
         self.client = genai.Client(api_key=GEMINI_API_KEY)
-        self.model = GEMINI_MODEL
+        self.model = GEMINI_EMBEDDING_MODEL
+        try:
+            self.buy_anchors = joblib.load("buy_anchors.pkl")
+            self.sell_anchors = joblib.load("sell_anchors.pkl")
+            self.noise_anchors = joblib.load("noise_anchors.pkl")
+        except FileNotFoundError:
+            print("Anchor files not found. Please run anchors.py to create them.")
+            self.buy_anchors, self.sell_anchors, self.noise_anchors = [], [], []
 
-    async def get_embedding(self, post: Post) -> NDArray[float64] | None:
-        clean_post_content = self._clean_for_embedding(post.content)
-
-        payload = f"Post by author {post.author_id} with content: {clean_post_content}"
+    async def get_embedding(self, text: str) -> NDArray[float64] | None:
+        clean_text = self._clean_for_embedding(text)
 
         try:
             response = await self.client.aio.models.embed_content(
-                model=GEMINI_EMBEDDING_MODEL,
-                contents=payload,
+                model=self.model,
+                contents=clean_text,
                 config=EmbedContentConfig(
                     output_dimensionality=GEMINI_EMBEDDING_LENGTH,
                     task_type="CLASSIFICATION"
@@ -64,192 +63,66 @@ class GeminiAnalyst:
             print(f"Gemini Error: {e}")
             return None
 
+    def get_signal_from_embedding(self, embedding: NDArray[float64]) -> Signal:
+        """
+        Classifies an embedding into a BUY, SELL, or HOLD signal
+        by comparing it to the pre-loaded anchor embeddings.
+        """
+        if embedding is None or not any([len(self.buy_anchors), len(self.sell_anchors), len(self.noise_anchors)]):
+            return Signal.HOLD
+
+        # Calculate max similarity to each anchor category
+        max_buy_sim = max([cosine_similarity(embedding, anchor) for anchor in self.buy_anchors], default=0)
+        max_sell_sim = max([cosine_similarity(embedding, anchor) for anchor in self.sell_anchors], default=0)
+        max_noise_sim = max([cosine_similarity(embedding, anchor) for anchor in self.noise_anchors], default=0)
+
+        # Basic classifier: which anchor category is the post most similar to?
+        similarities = {
+            Signal.BUY: max_buy_sim,
+            Signal.SELL: max_sell_sim,
+            Signal.HOLD: max_noise_sim
+        }
+
+        # A minimum confidence threshold to avoid classifying pure noise
+        confidence_threshold = 0.4 
+        
+        # Find the signal with the highest similarity
+        best_signal = max(similarities, key=similarities.get)
+        best_sim_score = similarities[best_signal]
+
+        if best_sim_score < confidence_threshold:
+            return Signal.HOLD
+
+        # If it's most similar to noise, it's a HOLD
+        if best_signal == Signal.HOLD and best_sim_score > max(max_buy_sim, max_sell_sim):
+             return Signal.HOLD
+
+        # Return the strongest signal (BUY or SELL)
+        if max_buy_sim > max_sell_sim:
+            return Signal.BUY
+        else:
+            return Signal.SELL
 
     def _clean_for_embedding(self, text: str) -> str:
         text = text.replace("\n", " ")
         # 1. STRIP MARKDOWN LINKS: [Text](url) -> Text
-        # Captures the text inside [], ignores the () part
         text = re.sub(r'\[([^\]]+)\]\([^\)]+\)', r'\1', text)
-
-        # 2. STRIP IMAGES: ![Alt](url) -> "" (Or keep alt text if you prefer)
+        # 2. STRIP IMAGES: ![Alt](url) -> ""
         text = re.sub(r'!\[[^\]]*\]\([^\)]+\)', '', text)
-
-        # 3. NUKE RAW URLS: https://... -> ""
-        # URLs confuse semantic models.
+        # 3. NUKE RAW URLS
         text = re.sub(r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+', '', text)
-
-        # 4. FIX HASHTAGS: #WarInVenezuela -> War In Venezuela
+        # 4. FIX HASHTAGS
         def split_hashtag(match):
             tag = match.group(0)[1:] # Remove #
-            # Split CamelCase: "WarInVenezuela" -> "War In Venezuela"
             return " " + " ".join(re.findall(r'[A-Z]?[a-z]+|[A-Z]+(?=[A-Z]|$)', tag))
-        
         text = re.sub(r'#[A-Za-z0-9_]+', split_hashtag, text)
-
         # 5. CLEAN WHITESPACE
         text = re.sub(r'\s+', ' ', text).strip()
-
         return text
 
-    async def analyze_posts(self, current_events: List[EventRow], new_posts: List[Post]) -> EventsResult | None:
-
-        input_json = {
-            "current_events": [
-                {
-                    "id": event.id,
-                    "summary": event.summary,
-                }
-                for event in current_events
-            ],
-            "new_posts": [
-                {
-                    "url": post.url,
-                    "content": post.content
-                } for post in new_posts
-            ]
-        }
-        
-        input_json_string = json.dumps(input_json)
-        
-        prompt = f"""
-# Intelligence Analyst Task
-
-## Context
-
-You are an Expert Intelligence Analyst. Your goal is to filter social media noise and aggregate ONLY high-signal events.
-
-## Definitions
-
-**High Signal Criteria (Score 7-10) - KEEP THESE:**
-- War, troop movements, physical infrastructure failure, drone strikes, bombings, terrorism, assassinations.
-- Central bank rates, sovereign bankruptcy, new trade laws, supply chain halts.
-- Zero-day exploits (CVEs > 9), Model Weight releases, massive data breaches.
-
-**Low Signal Criteria (Score 0-4) - DISCARD THESE:**
-- General updates, opinion pieces, recaps, tutorials.
-- Minor accidents (e.g., car crashes, road hazards).
-- Spam, NSFW content, celebrity gossip, movie/book reviews.
-- "Slow news day" commentary.
-
-## Input Data
-
-The user will provide a JSON object containing:
-1. "current_events": A list of events we already know about.
-2. "new_posts": A list of raw social media scrapes.
-
-## Directives (Process Step-by-Step)
-
-1. **Analyze Content First:** detailedly read the `content` of a `new_post`. 
-2. **Assign Score:** Assign a signal score based on the definitions above.
-3. **Filter:** - IF the score is less than 7, **DISCARD** the post immediately. Do not process it further.
-   - IF the score is 7 or higher, proceed to step 4.
-4. **Match or Create:**
-   - Check if this high-signal post explicitly discusses an event in `current_events`.
-   - **CRITICAL:** Do not match based on loose keywords (e.g., do not match a "Swiss agriculture" post to a "Swiss explosion" event). The facts must match.
-   - **Match:** If it matches an existing ID, add to `updated_sources`. If it changes the facts, add to `updated_summaries`.
-   - **New:** If it is high signal and NOT in the current list, add to `new_events`.
-
-## Output Format
-
-You must return **ONLY** a raw JSON object. No markdown formatting, no explanation text.
-
-Structure:
-{{
-  "new_events": [ {{ "summary": "string", "signal": int, "sources": ["url"] }} ],
-  "updated_summaries": [ {{ "id": int, "summary": "string" }} ],
-    "updated_sources": [ {{ "id": int, "sources": ["url"] }} ]
-}}
-
-If no posts meet the High Signal criteria, return:
-{{
-  "new_events": [],
-  "updated_summaries": [],
-  "updated_sources": []
-}}
-
-## Input Data
-
-```json
-{input_json_string}
-```
-"""
-
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_json_schema=EventsResult.model_json_schema(),
-                )
-            )
-            if response.text is None: return None
-            return EventsResult.model_validate_json(response.text)
-        except Exception as e:
-            print(f"Gemini Error: {e}")
-            return None
-        
-
-    async def summarise_post(self, post_content: str) -> SummarisePost | None:
-
-        prompt = f"""
-# Intelligence Analyst Task
-
-## Context
-You are an Expert Intelligence Analyst. Your goal is to filter social media noise and aggregate ONLY high-signal events into standardized, vector-friendly summaries.
-
-## Definitions
-**High Signal Criteria (Score 7-10) - KEEP THESE:**
-- **Geopolitical acts:** War, troop movements, drone strikes, bombings, confirmed terrorism, assassinations.
-- **Economic/Cyber:** Central bank rates, sovereign bankruptcy, new trade laws, supply chain halts, Zero-day exploits (CVEs > 9), Model Weight releases, massive data breaches.
-- **Critical Infrastructure:** Total physical infrastructure failure (e.g., grid collapse, dam failure) affecting a large region.
-
-**Low Signal Criteria (Score 0-4) - DISCARD THESE:**
-- General updates, opinion pieces, recaps, tutorials.
-- **Civilian Accidents & Disasters:** Plane crashes, train derailments, fires, or natural disasters **UNLESS** there is immediate confirmation of terrorism, an act of war, or it involves a Head of State.
-- Spam, NSFW content, celebrity gossip, movie/book reviews.
-- "Slow news day" commentary.
-- Singular domestic events (local crime, protests without national impact).
-
-## Directives (Process Step-by-Step)
-1. **Analyze Content:** Detailedly read the content.
-2. **Assign Score:** Assign a signal score based on the definitions above.
-3. **Filter:** IF the score is less than 6, **DISCARD** the post immediately. Return an empty string summary and signal 0.
-4. **Standardize & Summarize:** IF the score is more than 6, create a summary optimized for vector clustering:
-   - **Entity Normalization:** Use the most specific, universally recognized name for entities.
-   - **Syntax:** strict **[Subject] [Action] [Object]** format.
-   - **Tone:** Clinical and dry. Remove all adjectives (e.g., "shocking", "massive") unless defining the scale (e.g., "7.8 magnitude").
-   - *Example:* "Trump suggests buying Greenland." (Not: "The US President has discussed the idea of purchasing Greenland.")
-5. **RETHINK SIGNAL:** Rescore based on the boring summary. If it no longer seems critical, discard.
-
-## Output Format
-
-You must return **ONLY** a raw JSON object. No markdown formatting, no explanation text.
-
-Structure:
-{{ "summary": "string", "signal": int }} ],
-
-If no posts meet the High Signal criteria, return:
-{{ "summary": "", "signal": 0 }}
-
-## Input Data
-
-```md
-{post_content}
-```
-"""
-
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config=GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_json_schema=SummarisePost.model_json_schema(),
-                )
-            )
-            if response.text is None: return None
-            return SummarisePost.model_validate_json(response.text)
-        except Exception as e:
-            print(f"Gemini Error: {e}")
-            return None
+    async def get_signal_for_post(self, post: Post) -> Signal:
+        """High-level method to get a signal for a Post object."""
+        # Construct a meaningful payload from the post
+        payload = f"Post by author {post.author_id}. Content: {post.content}"
+        embedding = await self.get_embedding(payload)
+        return self.get_signal_from_embedding(embedding)

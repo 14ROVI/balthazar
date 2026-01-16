@@ -113,10 +113,9 @@ RSS_FEEDS = [
 ]
 
 class RssFetcher:
-    def __init__(self, db: Database, antibot: AntiBot, analyst: GeminiAnalyst, queue: Queue[Post]) -> None:
+    def __init__(self, db: Database, antibot: AntiBot, queue: Queue[Post]) -> None:
         self.db = db
         self.antibot = antibot
-        self.analyst = analyst
         self.queue = queue
 
     async def fetch_updates(self):

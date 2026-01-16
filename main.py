@@ -1,18 +1,19 @@
+import asyncio
+import os
+import uvicorn
+from api import app
+
 from db import Database
 from rss import RssFetcher
 from trance import AntiBot
-from alert import AlertSender
 from ai_engine import GeminiAnalyst
 from mastodon_listener import MastodonClient
 from bluesky import BlueskyClient
 from post_processor import PostProcessor
+from market_data import MarketDataProvider
 import anchors
 
-import asyncio
-import os
-
 FETCH_INTERVAL = 5 * 60
-ALERT_INTERVAL = 30
 
 async def fetcher_loop(fetcher: RssFetcher):
     while True:
@@ -22,42 +23,39 @@ async def fetcher_loop(fetcher: RssFetcher):
             print(f"[Fetcher Error]: {e}")    
         await asyncio.sleep(FETCH_INTERVAL)
 
-async def alerter_loop(alert_sender: AlertSender):
-    while True:
-        try:
-            await alert_sender.send_alerts()
-        except Exception as e:
-            print(f"[Alerter Error]: {e.__repr__()}")
-        await asyncio.sleep(ALERT_INTERVAL)
-
 
 async def main():
-    if not os.path.exists("high_signal_anchors.pkl"):
-        await anchors.create_anchors()
-
     async with AntiBot() as antibot:
+        # --- Component Initialization ---
         queue = asyncio.Queue()
         database = Database()
         analyst = GeminiAnalyst()
-    
-        rss_client = RssFetcher(database, antibot, analyst, queue)
+        market_provider = MarketDataProvider()
+
+        # --- Producer Initialization ---
+        rss_client = RssFetcher(database, antibot, queue)
         mastodon_client = MastodonClient(queue)
         bluesky_client = BlueskyClient(queue)
     
-        processor = PostProcessor(database, analyst, queue)
-        
-        alerter = AlertSender(database)
+        # --- Consumer/Processor Initialization ---
+        processor = PostProcessor(database, analyst, market_provider, queue)
+
+        # --- Uvicorn Server Setup ---
+        config = uvicorn.Config(app=app, host="127.0.0.1", port=7777, log_level="info")
+        server = uvicorn.Server(config)
     
+        # --- Task Creation ---
         tasks = [
             asyncio.create_task(fetcher_loop(rss_client)),
             asyncio.create_task(bluesky_client.listen()),
             asyncio.create_task(processor.process_queue()),
-            asyncio.create_task(alerter_loop(alerter)),
+            asyncio.to_thread(mastodon_client.listen),
+            asyncio.create_task(server.serve()),
         ]
-        
-        mastodon_client.listen()
         
         await asyncio.gather(*tasks)
 
 if __name__ == "__main__":
+    # To run this, execute `python main.py` in your terminal
+    print("Starting Balthazar...")
     asyncio.run(main())
